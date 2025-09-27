@@ -3,6 +3,13 @@ raw_images_sequence/
 isp_processed_frames/
 #忽略视频文件
 *.mp4
+*.avi
+*.mov
+*.mkv
+#忽略日志文件
+*.log
+#忽略临时文件
+*.tmp
+*.temp
 #忽略缓存文件
-_pycache_/
-
+__pycache__/
