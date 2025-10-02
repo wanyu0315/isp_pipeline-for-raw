@@ -56,7 +56,7 @@ def main_batch():
 
     # --- 5. 定义处理参数 (所有帧使用相同参数) ---
     processing_params = {
-        'demosaic': {'algorithm': 'LMMSE'},
+        'demosaic': {'algorithm': 'CV'},
         'whitebalance': {'algorithm': 'gray_world'},
         'gammacorrection': {'gamma': 2.2}
     }
@@ -67,6 +67,7 @@ def main_batch():
         try:
             # 运行管道
             final_image = my_isp.process(raw_file_path, params=processing_params)
+            # final_image_rgb = cv2.cvtColor(final_image, cv2.COLOR_BGR2RGB)  # 转换为RGB顺序
             
             # 生成输出文件名
             base_name = os.path.basename(raw_file_path)
@@ -80,27 +81,89 @@ def main_batch():
             print(f"处理文件 {raw_file_path} 时出错: {e}")
             continue
 
-    print(f"所有帧处理完毕，已保存至 '{output_folder}' 文件夹。")
+    print(f"所有帧处理完毕，已保存至 '{output_folder}' 文件夹。")  
 
-    # --- 7. (可选) 将处理后的帧合成为视频 ---
-    print("正在将处理后的帧合成为视频...")
+    """
+        --- 额外说明 ---
+        注意使用CV的去马赛克算法时，输出图像的颜色通道顺序是BGR而不是RGB。
+        因此在后续进行合成视频时，需注意这一点，如果不是使用OpenCV进行视频写入，
+        可能需要转换颜色通道顺序。
+        当imageio读取您的PNG文件时，它并不知道这个文件是OpenCV以BGR顺序创建的。它只是按顺序读取了三个通道的数据，
+        并把它们加载到一个NumPy数组中。
+        frame = imageio.imread(frame_path) 这行代码返回的frame变量，其内存中的通道顺序实际上还是 B-G-R。
+    """
+
+    # --- 7. (可选) 将处理后的帧合成为视频 (OpenCV-MKV无损方案) ---
+    print("正在将处理后的帧合成为无损视频 (FFV1)...")
     processed_frames = sorted(glob.glob(os.path.join(output_folder, '*.png')))
     
     if not processed_frames:
-        print("没有找到已处理的帧，无法创建视频。")
+        # ... (错误处理)
+        return
+        
+    first_frame = cv2.imread(processed_frames[0], cv2.IMREAD_UNCHANGED)
+    height, width, _ = first_frame.shape
+
+    #  指定输出文件为 .avi 或 .mkv，它们对FFV1支持更好
+    output_video_path = 'output_video_lossless.mkv'
+    
+    #  使用 FFV1 的 FourCC 代码
+    fourcc = cv2.VideoWriter_fourcc(*'FFV1') 
+    writer = cv2.VideoWriter(output_video_path, fourcc, 30.0, (width, height))
+
+    if not writer.isOpened():
+        print("无法打开VideoWriter，请检查OpenCV配置。")
         return
 
-    # 使用 'I' 模式读取16位PNG
-    with imageio.get_writer('output_video.mp4', fps=30, quality=8) as writer:
-        for frame_path in tqdm(processed_frames, desc="Creating video"):
-            frame = imageio.imread(frame_path, mode='I')
-            # 写入视频前需要从16位 (0-65535) 转换为8位 (0-255)
-            # (frame / 257) 是比 (frame / 256) 更精确的转换方式
-            frame_8bit = (frame / 257).astype(np.uint8)
-            writer.append_data(frame_8bit)
+    for frame_path in tqdm(processed_frames, desc="Creating Lossless Video"):
+        frame_16bit_bgr = cv2.imread(frame_path, cv2.IMREAD_UNCHANGED)
+        frame_8bit_bgr = (frame_16bit_bgr / 257.0).astype(np.uint8)
+        writer.write(frame_8bit_bgr)
             
-    print("视频 'output_video.mp4' 创建成功！")
+    writer.release()
+    print(f"无损视频 '{output_video_path}' 创建成功！")
 
+    # # --- 7. (可选) 将处理后的帧合成为视频 (OpenCV-MP4格式) ---
+    # print("正在将处理后的帧合成为视频 (使用OpenCV)...")
+    # processed_frames = sorted(glob.glob(os.path.join(output_folder, '*.png')))
+    
+    # if not processed_frames:
+    #     print("没有找到已处理的帧，无法创建视频。")
+    #     return
+        
+    # #  从第一张图片获取视频的尺寸
+    # first_frame = cv2.imread(processed_frames[0], cv2.IMREAD_UNCHANGED)
+    # if first_frame is None:
+    #     print(f"无法读取第一帧图像: {processed_frames[0]}")
+    #     return
+    # height, width, _ = first_frame.shape
+
+    # #  定义视频编码器和创建 VideoWriter 对象
+    # # 'mp4v' 是一个常用的MP4编码器
+    # fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
+    # writer = cv2.VideoWriter('output_video.mp4', fourcc, 30.0, (width, height))
+
+    # if not writer.isOpened():
+    #     print("无法打开VideoWriter，请检查OpenCV配置。")
+    #     return
+
+    # for frame_path in tqdm(processed_frames, desc="Creating video with OpenCV"):
+    #     #  使用OpenCV读取16位PNG图像 (它会读取为BGR顺序)
+    #     frame_16bit_bgr = cv2.imread(frame_path, cv2.IMREAD_UNCHANGED)
+        
+    #     if frame_16bit_bgr is None:
+    #         print(f"警告：跳过无法读取的帧 {frame_path}")
+    #         continue
+
+    #     #  将16位数据转换为8位
+    #     frame_8bit_bgr = (frame_16bit_bgr / 257.0).astype(np.uint8)
+        
+    #     #  将8位帧写入视频
+    #     writer.write(frame_8bit_bgr)
+            
+    # # 释放writer对象，这是完成视频写入的关键步骤！
+    # writer.release()
+    # print("视频 'output_video.mp4' 创建成功！")
 
 if __name__ == "__main__":
     main_batch()

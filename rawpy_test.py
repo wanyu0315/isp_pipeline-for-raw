@@ -311,7 +311,7 @@ def demo_raw_to_dng_conversion():
 def convert_your_raw_file(raw_file_path: str, 
                          width: int, 
                          height: int,
-                         bayer_pattern: str = 'RGGB',
+                         bayer_pattern: str = 'GRBG',
                          bit_depth: int = 16) -> str:
     """转换您的实际RAW文件到DNG"""
     
