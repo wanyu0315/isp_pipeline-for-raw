@@ -10,9 +10,18 @@ import subprocess # 导入subprocess模块
 
 # 导入我们的ISP管道和模块
 from isp_pipeline import ISPPipeline
-from demosaic import Demosaic  # 导入我们最终的混合版本
+from raw_loader import RawLoader
+from raw_denoise import RawDenoise   
+from demosaic import Demosaic  
 from white_balance import WhiteBalance
 from gamma_correction import GammaCorrection
+from color_correction_matrix import ColorCorrectionMatrix  
+from gamma_correction import GammaCorrection
+from color_space_conversion import ColorSpaceConversion
+from denoise import Denoise
+from sharpening import Sharpen
+from contrast_and_saturation import ContrastSaturation
+from yuv_to_rgb import YUVtoRGB
 
 def main_batch():
     # --- 1. 定义传感器/图像的元数据 ---
@@ -20,11 +29,11 @@ def main_batch():
     IMAGE_WIDTH = 1280
     IMAGE_HEIGHT = 800
     IMAGE_DTYPE = np.uint16  # 或 np.uint8, 取决于您的RAW数据位深
-    BAYER_PATTERN = 'GRBG'   # 根据传感器规格设置
+    BAYER_PATTERN = 'GBRG'   # 根据传感器规格设置
 
     # --- 2. 定义输入和输出文件夹 ---
-    input_folder = 'ISPpipline/integrated_test_raw16_2raw' # 存放RAW序列的文件夹
-    output_folder = 'ISPpipline/isp_processed_frames_raw16_2raw/'   # 存放处理后PNG帧的文件夹
+    input_folder = 'ISPpipline/raw_data/raw_data_test' # 存放RAW序列的文件夹
+    output_folder = 'ISPpipline/isp_output_frame/video_frame_bgr_test'   # 存放处理后PNG帧的文件夹
     
     # 确保输出文件夹存在
     if not os.path.exists(output_folder):
@@ -41,25 +50,78 @@ def main_batch():
     print(f"找到 {len(raw_files)} 个 .raw 文件进行处理。")
 
     # --- 4. 实例化并组装ISP管道 ---
-    # <--- 关键改动: 在创建Demosaic实例时，必须传入元数据
+    # <--- 在创建Demosaic实例时，必须传入元数据
+    loader_module = RawLoader(
+            width=IMAGE_WIDTH,
+            height=IMAGE_HEIGHT,
+            dtype=IMAGE_DTYPE
+        )
     demosaic_module = Demosaic(
-        width=IMAGE_WIDTH,
-        height=IMAGE_HEIGHT,
         bayer_pattern=BAYER_PATTERN,
         dtype=IMAGE_DTYPE
     )
     
     my_isp = ISPPipeline(modules=[
+        # raw域处理
+        loader_module,
+        RawDenoise(),
+        # RGB域处理
         demosaic_module,
         WhiteBalance(),
-        GammaCorrection()
+        GammaCorrection(),
+
+        #YUV域处理
+        ColorSpaceConversion(),     
+        Denoise(),               
+        #Sharpen(),                                                  
+        #ContrastSaturation(),
+
+        #YUV——RGB处理
+        YUVtoRGB()                                   
     ])
 
     # --- 5. 定义处理参数 (所有帧使用相同参数) ---
     processing_params = {
+        # raw域参数、
+        'rawdenoise': {
+            'bayer_pattern': BAYER_PATTERN,
+            'algorithm': 'bayer_aware',    # 推荐：Bayer模式感知降噪
+            'strength': 0.5         # 降噪强度
+        },
+
+        # RGB域参数
         'demosaic': {'algorithm': 'CV'},
         'whitebalance': {'algorithm': 'gray_world'},
-        'gammacorrection': {'gamma': 2.2}
+        'gammacorrection': {'gamma': 2.2},
+
+        # YUV域参数
+        'colorspaceconversion': {
+            'method': 'bt709'  # HDTV标准
+        },
+        'denoise': {
+            'algorithm': 'nlm',
+            'h': 1
+        },
+        'sharpen': {
+            'algorithm': 'unsharp_mask',  # 专业级锐化
+            'radius': 1.0,
+            'amount': 1.5,
+            'threshold': 0
+        },
+        'contrastsaturation': {
+            'contrast_method': 'clahe',      # 自适应直方图均衡
+            'saturation_method': 'vibrance',  # 智能饱和度
+            'contrast_factor': 1.2,
+            'saturation_factor': 1.3,
+            'clip_limit': 2.0,           # 对比度限制，对比度clahe算法中的参数
+            'tile_grid_size': (8, 8),   # 网格限制，对比度clahe算法中的参数
+            'skin_protection': 0.5     # 肤色保护强度 (0-1)，饱和度vibrance算法中的参数
+        },
+
+        # YUV转RGB
+        'yuvtorgb': {
+            'method': 'bt709'  # 必须与RGB->YUV的方法一致！
+        }
     }
 
     # --- 6. 循环处理所有文件，并保存为序列表文件名 ---
@@ -71,20 +133,20 @@ def main_batch():
         # 使用 glob 查找符合命名规则的文件，更精确
         existing_frames = glob.glob(os.path.join(output_folder, 'frame_*.png'))
         if existing_frames:
-            print(f"✅ 输出文件夹 '{output_folder}' 已存在且包含 {len(existing_frames)} 帧，将跳过ISP处理步骤。")
+            print(f" 输出文件夹 '{output_folder}' 已存在且包含 {len(existing_frames)} 帧，将跳过ISP处理步骤。")
             skip_processing = True
             # 为后续视频合成步骤准备好 padding 和 total_files 变量
             total_files = len(existing_frames)
             padding = len(str(total_files)) # 根据文件数计算padding
         else:
-            print(f"ℹ️ 输出文件夹 '{output_folder}' 已存在但为空，将开始处理RAW文件。")
+            print(f" 输出文件夹 '{output_folder}' 已存在但为空，将开始处理RAW文件。")
     else:
-        print(f"ℹ️ 输出文件夹 '{output_folder}' 不存在，将创建并开始处理RAW文件。")
+        print(f" 输出文件夹 '{output_folder}' 不存在，将创建并开始处理RAW文件。")
         os.makedirs(output_folder, exist_ok=True) # 创建文件夹
 
     # --- 如果不需要跳过，则执行处理循环 ---
     if not skip_processing:
-        print("\n🚀 开始执行ISP处理流程...")
+        print("\n 开始执行ISP处理流程...")
         # 在循环开始前，获取文件总数以确定命名格式的宽度
         try:
             total_files = len(raw_files)
@@ -99,15 +161,28 @@ def main_batch():
         frame_counter = 0
         for raw_file_path in tqdm(raw_files, desc="Processing RAW sequence"):
             try:
-                # 运行管道
+                # 1. 运行管道
                 final_image = my_isp.process(raw_file_path, params=processing_params)
                 
-                # 使用计数器生成新的序列化文件名
+                # 2. 使用计数器生成新的序列化文件名
                 new_file_name = f"frame_{frame_counter:0{padding}d}.png"
                 output_path = os.path.join(output_folder, new_file_name)
                 
-                # 保存为16位PNG
-                cv2.imwrite(output_path, final_image)
+                # 3. 转换位深
+                if  final_image.dtype == np.float32:
+                    # --- 决定输出位深 ---
+                    # 8-bit:
+                    frame_to_save = (final_image * 255.0).astype(np.uint8)
+                    # 16-bit: 
+                    # frame_to_save = (final_image * 65535.0).astype(np.uint16)
+                else:
+                    frame_to_save = final_image
+
+                # 4. 转换颜色通道 (从 RGB -> BGR), 为了满足 cv2.imwrite 的 BGR 要求
+                frame_bgr = cv2.cvtColor(frame_to_save, cv2.COLOR_RGB2BGR)
+
+                # 5. 保存
+                cv2.imwrite(output_path, frame_bgr)
 
                 frame_counter += 1  # 增加计数器
 
@@ -132,67 +207,67 @@ def main_batch():
 
     # --- 7. 将处理后的帧合成为视频 (FFmpeg—16bit无损方案) ---
     
-    print("正在将处理后的帧合成为无损视频 (使用 FFmpeg)...")
+#     print("正在将处理后的帧合成为无损视频 (使用 FFmpeg)...")
 
-    # 检查帧是否存在
-    processed_frames_pattern = os.path.join(output_folder, '*.png')
-    frames_exist = glob.glob(processed_frames_pattern)
+#     # 检查帧是否存在
+#     processed_frames_pattern = os.path.join(output_folder, '*.png')
+#     frames_exist = glob.glob(processed_frames_pattern)
 
-    if not frames_exist:
-        print("错误:在输出文件夹中找不到任何处理后的帧。")
-        return
+#     if not frames_exist:
+#         print("错误:在输出文件夹中找不到任何处理后的帧。")
+#         return
 
-    output_video_path = 'output_video_8bit_yuv_lossless__raw16_2raw.mkv'
-    framerate = 30.0
+#     output_video_path = 'output_video_8bit_yuv_lossless__raw16_2raw.mkv'
+#     framerate = 30.0
 
-    first_frame = os.path.basename(frames_exist[0])
+#     first_frame = os.path.basename(frames_exist[0])
 
-# 尝试检测序列模式
-    if 'frame_' in first_frame and first_frame.endswith('.png'):
-    # 动态构建序列模式
-    # 使用f-string将变量padding插入到字符串中
-        sequence_pattern = os.path.join(output_folder, f'frame_%0{padding}d.png').replace('\\', '/')
-        command = [
-        'ffmpeg',
-        '-y',
-        '-framerate', str(framerate),  # 输入帧率
-        '-start_number', '0',  # 如果帧从frame_000.png开始
-        '-i', sequence_pattern,
-        '-c:v', 'ffv1',  # 编码器（ffv1，libx264）
-        '-level', '3',
-        '-pix_fmt', 'yuv420p',  # 像素格式(bgr48le、bgr24、yuv420p),注意需要和上面处理后的视频帧通道格式对应，OpenCV是BGR格式
-        '-slices', '24',  # 多线程编码,提升性能
-        '-slicecrc', '1',  # 错误检测
-        '-r', str(framerate),  # 明确指定输出帧率
-        '-vsync', 'cfr',  # 恒定帧率
-        output_video_path
-    ]
-    try:
-        print(f"执行FFmpeg命令: {' '.join(command)}")
+# # 尝试检测序列模式
+#     if 'frame_' in first_frame and first_frame.endswith('.png'):
+#     # 动态构建序列模式
+#     # 使用f-string将变量padding插入到字符串中
+#         sequence_pattern = os.path.join(output_folder, f'frame_%0{padding}d.png').replace('\\', '/')
+#         command = [
+#         'ffmpeg',
+#         '-y',
+#         '-framerate', str(framerate),  # 输入帧率
+#         '-start_number', '0',  # 如果帧从frame_000.png开始
+#         '-i', sequence_pattern,
+#         '-c:v', 'ffv1',  # 编码器（ffv1，libx264）
+#         '-level', '3',
+#         '-pix_fmt', 'yuv420p',  # 像素格式(bgr48le、bgr24、yuv420p),注意需要和上面处理后的视频帧通道格式对应，OpenCV是BGR格式
+#         '-slices', '24',  # 多线程编码,提升性能
+#         '-slicecrc', '1',  # 错误检测
+#         '-r', str(framerate),  # 明确指定输出帧率
+#         '-vsync', 'cfr',  # 恒定帧率
+#         output_video_path
+#     ]
+#     try:
+#         print(f"执行FFmpeg命令: {' '.join(command)}")
         
-        # Windows推荐的执行方式
-        result = subprocess.run(
-            command,  # 直接传递列表,不使用shell=True更安全
-            check=True,
-            capture_output=True,
-            text=True
-        )
+#         # Windows推荐的执行方式
+#         result = subprocess.run(
+#             command,  # 直接传递列表,不使用shell=True更安全
+#             check=True,
+#             capture_output=True,
+#             text=True
+#         )
         
-        print(f"无损视频已成功创建: {output_video_path}")
-        print(f"\n视频信息:")
-        print(f"- 帧数: {len(frames_exist)}")
-        print(f"- 帧率: {framerate} fps")
-        print(f"- 时长: {len(frames_exist)/framerate:.2f} 秒")
+#         print(f"无损视频已成功创建: {output_video_path}")
+#         print(f"\n视频信息:")
+#         print(f"- 帧数: {len(frames_exist)}")
+#         print(f"- 帧率: {framerate} fps")
+#         print(f"- 时长: {len(frames_exist)/framerate:.2f} 秒")
         
-    except subprocess.CalledProcessError as e:
-        print("FFmpeg 执行失败!")
-        print(f"返回码: {e.returncode}")
-        if e.stdout:
-            print(f"标准输出:\n{e.stdout}")
-        if e.stderr:
-            print(f"错误输出:\n{e.stderr}")
-    except FileNotFoundError:
-        print("错误: 找不到FFmpeg。请确保FFmpeg已安装并添加到系统PATH中。")
+#     except subprocess.CalledProcessError as e:
+#         print("FFmpeg 执行失败!")
+#         print(f"返回码: {e.returncode}")
+#         if e.stdout:
+#             print(f"标准输出:\n{e.stdout}")
+#         if e.stderr:
+#             print(f"错误输出:\n{e.stderr}")
+#     except FileNotFoundError:
+#         print("错误: 找不到FFmpeg。请确保FFmpeg已安装并添加到系统PATH中。")
 
     # # --- 7. (可选) 将处理后的帧合成为视频 (OpenCV-MKV无损方案) ---
     # print("正在将处理后的帧合成为无损视频 (FFV1)...")

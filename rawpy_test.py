@@ -2,7 +2,7 @@ import numpy as np
 import tifffile
 import io
 from typing import Tuple, Optional
-import pydng
+# import pydng
 
 class RAWToDNGConverter:
     """将裸RAW数据转换为DNG格式的转换器"""
