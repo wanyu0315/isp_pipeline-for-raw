@@ -34,8 +34,10 @@ def main_batch():
 
     # --- 2. 定义输入和输出文件夹 ---
     input_folder = 'ISPpipline/raw_data/raw_data_1' # 存放RAW序列的文件夹
-    output_folder = '/home/lizize/pyVHR_for_ISP/ISPpipline/isp_output_frame/video_1_frame_isp(2)'   # 存放处理后PNG帧的文件夹
+    output_folder = '/home/lizize/pyVHR_for_ISP/ISPpipline/isp_output_frame/video_1_frame_isp(5)_framewell'   # 存放处理后PNG帧的文件夹
     
+    output_video_path = 'Data_for_pyVHR/isp_output_Video/Video_1/output_video_1_isp(5)_framewell_8bit.mkv'
+
     # 确保输出文件夹存在
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
@@ -101,7 +103,7 @@ def main_batch():
         },
         'denoise': {
             'algorithm': 'gaussian',
-            'sigma': 0.8,
+            'sigma': 8.0,
             #'process_chroma': False
         },
         'sharpen': {
@@ -163,8 +165,10 @@ def main_batch():
         BLACK_ROW_THRESHOLD = 1.0  # 1.0 out of 255
         
         # 我们假设一个正常的帧不应该有任何“全黑”的行。
-        # 哪怕只有一行损坏，我们也将其丢弃。
         MIN_CORRUPT_ROWS_TO_REJECT = 1
+
+        # ⭐️ 用于存储上一帧
+        last_good_frame_bgr = None
 
         # 初始化帧计数器
         frame_counter = 0
@@ -172,6 +176,13 @@ def main_batch():
         # 使用 pbar.write 来打印警告，避免破坏进度条
         pbar = tqdm(raw_files, desc="Processing RAW sequence")
         for raw_file_path in pbar:
+
+            frame_to_save = None
+            
+            #  将初始化移动到 'try' 块的顶部
+            is_frame_corrupt = False 
+            corrupt_row_count = 0
+
             try:
                 # 1. 运行管道
                 final_image = my_isp.process(raw_file_path, params=processing_params)
@@ -189,41 +200,69 @@ def main_batch():
                 # 3. 转换颜色通道 (从 RGB -> BGR), 为了满足 cv2.imwrite 的 BGR 要求
                 frame_bgr = cv2.cvtColor(frame_to_save, cv2.COLOR_RGB2BGR)
 
-                # 计算每个水平行(row)的平均像素值。
-                # frame_bgr.shape is (height, width, 3)
-                # axis=(1, 2) 表示沿着“宽度”和“通道”维度进行平均
-                # 结果是一个(height,)的数组
+                # 4. 坏帧检测
                 try:
+                    # 4a. 计算行均值
                     row_means = np.mean(frame_bgr, axis=(1, 2))
+                    
+                    # 4b. 仅在 4a 成功后才计算
+                    corrupt_row_count = np.sum(row_means < BLACK_ROW_THRESHOLD)
+                    
                 except Exception as e:
-                    pbar.write(f"  [!] 警告: 帧 {os.path.basename(raw_file_path)} 无法计算行均值: {e}。跳过保存。")
-                    continue
-
-                # 统计有多少行的平均值低于阈值
-                corrupt_row_count = np.sum(row_means < BLACK_ROW_THRESHOLD)
+                    pbar.write(f"  [!] 警告: 帧 {os.path.basename(raw_file_path)} 无法计算行均值: {e}。")
+                    is_frame_corrupt = True # 标记为损坏
 
                 if corrupt_row_count >= MIN_CORRUPT_ROWS_TO_REJECT:
+                    is_frame_corrupt = True
+                
+                # 5.  决策：保存、替换还是跳过
+                if is_frame_corrupt:
                     # 这是一个损坏的帧
-                    pbar.write(f"  [!] 警告: 帧 {os.path.basename(raw_file_path)} 似乎已损坏 (检测到 {corrupt_row_count} 条全黑行)。跳过保存。")
+                    pbar.write(f"  [!] 警告: 帧 {os.path.basename(raw_file_path)} 似乎已损坏。")
                     
-                    # 不执行 cv2.imwrite 和 frame_counter += 1
-                    # 直接进入下一次循环
-                    continue
-
-                # 5. 保存 (只有“好”帧才会到这里)
-                new_file_name = f"frame_{frame_counter:0{padding}d}.png"
-                output_path = os.path.join(output_folder, new_file_name)
-
-                cv2.imwrite(output_path, frame_bgr)
-
-                frame_counter += 1  # 增加计数器
+                    if last_good_frame_bgr is not None:
+                        # 替换为上一帧
+                        frame_to_save = last_good_frame_bgr
+                        pbar.write(f"      ...已替换为上一帧。")
+                    else:
+                        # 这是第一帧，且已损坏，我们别无选择，只能跳过
+                        pbar.write(f"      ...这是第一帧且已损坏，无法替换，已跳过！")
+                        continue # 跳过循环，不保存也不递增计数器
+                
+                else:
+                    # 这是一个好帧
+                    frame_to_save = frame_bgr
+                    last_good_frame_bgr = frame_bgr.copy() # 更新“上一好帧”
 
             except Exception as e:
-                print(f"处理文件 {raw_file_path} 时出错: {e}")
-                continue
+                # 捕获ISP处理中的错误 (例如 `my_isp.process` 失败)
+                pbar.write(f"  [!] 错误: 处理文件 {raw_file_path} 时出错: {e}。")
+                if last_good_frame_bgr is not None:
+                    # ISP处理失败，也用上一帧替换
+                    frame_to_save = last_good_frame_bgr
+                    pbar.write(f"      ...ISP处理失败，已替换为上一帧。")
+                else:
+                    # 第一帧的ISP处理就失败了
+                    pbar.write(f"      ...第一帧处理失败，无法替换，已跳过！")
+                    continue
+            
+            # 6. 保存 (无论是好帧还是替换帧)
+            if frame_to_save is not None:
+                new_file_name = f"frame_{frame_counter:0{padding}d}.png"
+                output_path = os.path.join(output_folder, new_file_name)
+                
+                cv2.imwrite(output_path, frame_to_save)
 
-        print(f"\n✅ 所有帧处理完毕，已保存至 '{output_folder}' 文件夹，并已重命名为序列格式。") 
-
+                # 7. 增加计数器
+                frame_counter += 1
+            
+        pbar.close() 
+        print(f"\n✅ 所有帧处理完毕，已保存至 '{output_folder}' 文件夹，并已重命名为序列格式。")
+        print(f"  共处理 {frame_counter} / {len(raw_files)} 帧 (已替换或跳过损坏帧)。") 
+        
+        if frame_counter > 0:
+            padding = len(str(frame_counter - 1)) 
+        
     else:
         print("\n🚀 直接进入视频合成步骤。")
 
@@ -249,12 +288,19 @@ def main_batch():
         print("错误:在输出文件夹中找不到任何处理后的帧。")
         return
 
-    output_video_path = 'Data_for_pyVHR/isp_output_Video/Video_1/output_video_1_isp(2)_8bit.mkv'
+   #output_video_path = 'Data_for_pyVHR/isp_output_Video/Video_1/output_video_1_isp(2)_framewell_8bit.mkv'
     framerate = 30.0
 
-    # ⭐️ [新增] 显式定义编码参数，以便保存到JSON
+    #   显式定义编码参数，以便保存到JSON
     video_encoder = 'ffv1'
     video_pix_fmt = 'bgr24'
+
+    if not 'padding' in locals():
+         if frames_exist:
+             total_files = len(frames_exist)
+             padding = len(str(total_files))
+         else:
+             padding = 4 # 备用
 
     first_frame = os.path.basename(frames_exist[0])
 
